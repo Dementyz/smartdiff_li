@@ -1,14 +1,11 @@
+import argparse
 import sys
 from pathlib import Path
 
-list_commands = ["analyze"]
-
-def validate_terminal():
-    if (len(sys.argv) < 2):
-        print("Error count of arguments, you need 2 or more args")
-        return False
-
-    return True
+from .analysis import analyze_diff
+from .gitutil import GitError, repo_root, resolve_revisions
+from .report import format_json, format_text
+from .risk import LEVEL_ORDER
 
 # Функция для анализа проекта 
 def analyze_project(proj_path):
@@ -36,19 +33,48 @@ def print_directory(directory):
         print('\n')
               
 
-def main():
-    if validate_terminal():
-        command = sys.argv[1]
-        if (command == "analyze"):
-            if len(sys.argv) < 3:
-                print("Error: required direction")
-            else:
-               project_path = Path(sys.argv[2])
-               analyze_project(proj_path=project_path)
-        else:
-            print(f"Undefined command {command}")
+def build_parser():
+    parser = argparse.ArgumentParser(prog="smartdiff", description="Static impact analysis for code changes")
+    commands = parser.add_subparsers(dest="command", required=True)
 
+    analyze = commands.add_parser("analyze", help="list Python files of a project")
+    analyze.add_argument("path", type=Path)
+
+    diff = commands.add_parser("diff", help="semantic diff with impact analysis and risk score")
+    diff.add_argument("revs", nargs="*", metavar="REV",
+                      help="BASE | BASE HEAD | BASE..HEAD | BASE...HEAD (default: HEAD vs working tree)")
+    diff.add_argument("-C", "--path", type=Path, default=Path("."), help="repository path")
+    diff.add_argument("--depth", type=int, default=3, help="how many call levels to follow (default: 3)")
+    diff.add_argument("--format", choices=("text", "json"), default="text")
+    diff.add_argument("--all", action="store_true", help="show every impacted symbol")
+    diff.add_argument("--fail-on", choices=LEVEL_ORDER[1:], help="exit with code 2 at this risk level or higher")
+    return parser
+
+
+def run_diff(args):
+    root = repo_root(args.path)
+    base, head, label = resolve_revisions(root, args.revs)
+    result = analyze_diff(root, base, head, label, depth=args.depth)
+    if args.format == "json":
+        print(format_json(result))
+    else:
+        print(format_text(result, show_all=args.all))
+    if args.fail_on and LEVEL_ORDER.index(result.risk.level) >= LEVEL_ORDER.index(args.fail_on):
+        return 2
+    return 0
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if args.command == "analyze":
+        analyze_project(proj_path=args.path)
+        return 0
+    try:
+        return run_diff(args)
+    except GitError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

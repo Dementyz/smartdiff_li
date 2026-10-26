@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smartdiff-li"
+version = "0.1.0"
+description = "Static impact analysis for code changes"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+smartdiff = "smartdiff_li.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["smartdiff_li*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
