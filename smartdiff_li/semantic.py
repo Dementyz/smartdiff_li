@@ -3,9 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .symbols import (
-    IMPORTS, KWARG, POSITIONAL, POSONLY, VARARG, Param, Symbol,
-)
+from . import core
+from .symbols import IMPORTS, Param, Symbol
 
 # переносим символ как "moved" только если он не тривиальный
 MIN_MOVE_SIZE = 8
@@ -61,23 +60,8 @@ def compare_symbols(path: str, module: str, old: dict[str, Symbol],
 
 
 def signature_break(old: tuple[Param, ...], new: tuple[Param, ...]) -> bool:
-    """Ломает ли новая сигнатура существующие вызовы."""
-    new_by_name = {p.name: p for p in new}
-    old_names = {p.name for p in old}
-    for p in old:
-        q = new_by_name.get(p.name)
-        if q is None or q.kind != p.kind:
-            return True
-        if p.has_default and not q.has_default:
-            return True
-    for q in new:
-        if q.name not in old_names and not q.has_default and q.kind not in (VARARG, KWARG):
-            return True
-    positional = (POSONLY, POSITIONAL)
-    old_pos = [p.name for p in old if p.kind in positional]
-    new_pos = [p.name for p in new if p.kind in positional]
-    # новый параметр в середине сдвигает позиционные аргументы
-    return new_pos[:len(old_pos)] != old_pos
+    """Ломает ли новая сигнатура существующие вызовы (считает ядро)."""
+    return core.signature_break(old, new)
 
 
 def describe_signature(a: Symbol, b: Symbol) -> tuple[str, bool]:

@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
+from . import core
 from .symbols import IMPORTS, FUNC_NODES, Symbol, extract_symbols
 
 
@@ -83,7 +84,13 @@ class ProjectGraph:
         self.modules: dict[str, ModuleInfo] = {}
         self.lookup: dict[str, str] = {}
         self.by_path: dict[str, str] = {}
-        self.rdeps: dict[str, set[str]] = defaultdict(set)
+        # узлы и рёбра хранит ядро (csrc/graph.c), здесь только отображение имён в id
+        self.symbol_graph = core.new_graph()
+        self.node_ids: dict[tuple[str, str], int] = {}
+        self.node_keys: list[tuple[str, str]] = []
+        self.module_graph = core.new_graph()
+        self.module_ids: dict[str, int] = {}
+        self.module_list: list[str] = []
         self.refs: dict[str, dict[str, list[Ref]]] = defaultdict(lambda: defaultdict(list))
         self.attr_uses: dict[str, list[Use]] = defaultdict(list)
         self.unresolved: dict[str, list[Use]] = defaultdict(list)
@@ -94,11 +101,6 @@ class ProjectGraph:
 
     def module_of(self, path: str) -> str | None:
         return self.by_path.get(path)
-
-    def kind_of(self, module: str, symbol: str) -> str:
-        info = self.modules.get(module)
-        sym = info.symbols.get(symbol) if info else None
-        return sym.kind if sym else "function"
 
     def resolve_export(self, module: str, name: str) -> tuple[str, str]:
         """Идёт по цепочке реэкспортов (from .core import X в __init__.py)."""
@@ -115,22 +117,28 @@ class ProjectGraph:
             name = target_name + ("." + rest if rest else "")
         return module, name
 
+    def importers(self, module: str) -> set[str]:
+        node = self.module_ids.get(module)
+        if node is None:
+            return set()
+        return {self.module_list[user] for user, _, _ in self.module_graph.users(node)}
+
     def dependents(self, module: str, depth: int | None = None) -> dict[str, int]:
         """Модули, которые импортируют `module` (транзитивно), и расстояние до них."""
-        seen = {module: 0}
-        frontier = [module]
-        level = 0
-        while frontier and (depth is None or level < depth):
-            level += 1
-            nxt = []
-            for m in frontier:
-                for dep in self.rdeps.get(m, ()):
-                    if dep not in seen:
-                        seen[dep] = level
-                        nxt.append(dep)
-            frontier = nxt
-        del seen[module]
-        return seen
+        node = self.module_ids.get(module)
+        if node is None:
+            return {}
+        reached = self.module_graph.reachable(node, -1 if depth is None else depth)
+        return {self.module_list[n]: dist for n, dist in reached.items()}
+
+    def trace(self, module: str, qualname: str, depth: int, seeds) -> list[tuple[str, str, int, bool, int]]:
+        """Обход влияния в ядре. seeds: первый уровень [(Use, certain)]."""
+        origin = self.node_ids.get((module, qualname))
+        if origin is None:
+            return []
+        first = [(self.node_ids[(u.module, u.symbol)], certain, u.lineno) for u, certain in seeds]
+        return [(*self.node_keys[node], level, certain, line)
+                for node, level, certain, line in self.symbol_graph.trace([origin], depth, first)]
 
     def references_to(self, module: str, qualname: str, kind: str = "function",
                       attr_names: bool = True) -> list[tuple[Use, bool]]:
@@ -155,7 +163,7 @@ class ProjectGraph:
 
         name = qualname.rsplit(".", 1)[-1]
         if attr_names and kind in ("method", "attribute") and not name.startswith("__"):
-            scope = {module, *self.rdeps.get(module, ())}
+            scope = {module, *self.importers(module)}
             for use in self.attr_uses.get(name, ()):
                 if use.module in scope and (use.module, use.symbol) != (module, qualname):
                     add(use, False)
@@ -362,15 +370,51 @@ def build_graph(paths: Iterable[str], read: Callable[[str], str | None]) -> Proj
 
     for info in graph.modules.values():
         _collect_imports(graph, info)
+    graph.module_list = list(graph.modules)
+    graph.module_ids = {name: i for i, name in enumerate(graph.module_list)}
+    graph.module_graph.add_nodes(len(graph.module_list))
     for info in graph.modules.values():
         for target in info.imports:
-            if target != info.name:
-                graph.rdeps[target].add(info.name)
+            graph.module_graph.add_edge(graph.module_ids[target], graph.module_ids[info.name])
+
     for info in graph.modules.values():
         for symbol in info.symbols.values():
             if symbol.qualname == IMPORTS:
                 continue
+            graph.node_ids[(info.name, symbol.qualname)] = len(graph.node_keys)
+            graph.node_keys.append((info.name, symbol.qualname))
             collector = _Collector(graph, info, symbol)
             for node in symbol.nodes:
                 collector.visit(node)
+    graph.symbol_graph.add_nodes(len(graph.node_keys))
+    _link_symbols(graph)
     return graph
+
+
+def _link_symbols(graph: ProjectGraph) -> None:
+    """Переводит ссылки в рёбра ядра по тем же правилам, что и references_to:
+    точная ссылка; ссылка на член класса (вероятно затрагивает сам класс);
+    ссылка на класс (вероятно затрагивает его члены, конструктор точно)."""
+    by_top: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for module, qualname in graph.node_keys:
+        by_top[(module, qualname.split(".")[0])].append(qualname)
+
+    add, ids = graph.symbol_graph.add_edge, graph.node_ids
+    for module, tops in graph.refs.items():
+        for top, refs in tops.items():
+            members = by_top.get((module, top), ())
+            for ref in refs:
+                user = ids[(ref.module, ref.symbol)]
+                target = ref.target_name
+                exact = ids.get((module, target))
+                if exact is not None:
+                    add(exact, user, True, ref.lineno)
+                parts = target.split(".")
+                for i in range(1, len(parts)):
+                    owner = ids.get((module, ".".join(parts[:i])))
+                    if owner is not None:
+                        add(owner, user, False, ref.lineno)
+                prefix = target + "."
+                for qualname in members:
+                    if qualname.startswith(prefix):
+                        add(ids[(module, qualname)], user, qualname.endswith(".__init__"), ref.lineno)

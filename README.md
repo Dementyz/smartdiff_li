@@ -39,7 +39,9 @@ Python (3.9+). Other files in the diff are listed but not analyzed.
 pip install -e .
 ```
 
-No runtime dependencies, only the standard library and `git`.
+No runtime dependencies, only the standard library and `git`. If a C compiler is available, the
+C core (`smartdiff_li._core`) is built during installation; without one, installation still succeeds
+and SmartDiff falls back to the pure-Python core. `smartdiff --version` shows which core is in use.
 
 ## Usage
 
@@ -86,16 +88,35 @@ CHANGES
 
 ## Architecture
 
+Python parses code and talks to git; the C core stores the dependency graphs and runs the
+algorithms on them.
+
 ```
-gitutil.py    changed files and file contents at any revision
-symbols.py    AST -> symbols (functions, classes, variables) with normalized fingerprints
-semantic.py   old vs new symbols -> changes, signature compatibility, move detection
-graph.py      import graph and symbol-level references of the new tree
-analysis.py   ties it together: changes -> impact (BFS over references) -> risk
-risk.py       scoring heuristics
-report.py     text and JSON output
-cli.py        command line
+smartdiff_li/                     Python
+  gitutil.py    changed files and file contents at any revision
+  symbols.py    AST -> symbols (functions, classes, variables) with normalized fingerprints
+  semantic.py   old vs new symbols -> changes, move detection
+  graph.py      resolves imports and references, feeds them to the core as nodes and edges
+  analysis.py   ties it together: changes -> impact -> risk
+  risk.py       aggregates per-change scores into the overall risk
+  report.py     text and JSON output
+  cli.py        command line
+  core.py       entry point to the core: C extension if built, otherwise _pycore.py
+  _pycore.py    pure-Python core with the same API
+
+csrc/                             C11, no dependencies
+  sd_core.h     core API
+  graph.c       reverse dependency graph, breadth-first impact tracing with certainty
+  signature.c   breaking vs. compatible signature changes
+  risk.c        per-change risk score and risk levels
+  pymodule.c    CPython bindings (smartdiff_li._core)
+  test_core.c   C unit tests
 ```
+
+The core exposes a small API (`Graph.add_edge`, `Graph.trace`, `Graph.reachable`,
+`signature_break`, `change_score`, `level_for`). Both implementations are tested against each
+other on random inputs, and the whole test suite runs once per core. Set
+`SMARTDIFF_PURE_PYTHON=1` to force the Python core.
 
 ## Limitations
 
@@ -107,8 +128,10 @@ change signatures) are invisible to it. Treat the output as a map of where to lo
 ## Development
 
 ```
-python -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest
+python -m venv .venv && .venv/bin/pip install -e '.[dev]' setuptools
+make ext PYTHON=.venv/bin/python     # build the C extension in place
+make test PYTHON=.venv/bin/python    # C unit tests + pytest (both cores)
+make test-c-asan                     # C unit tests under AddressSanitizer and UBSan
 ```
 
 ## License

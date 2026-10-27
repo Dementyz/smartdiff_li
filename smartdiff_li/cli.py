@@ -2,6 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import core
 from .analysis import analyze_diff
 from .gitutil import GitError, repo_root, resolve_revisions
 from .report import format_json, format_text
@@ -35,6 +36,7 @@ def print_directory(directory):
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="smartdiff", description="Static impact analysis for code changes")
+    parser.add_argument("--version", action="version", version=f"smartdiff 0.1.0 (core: {core.backend()})")
     commands = parser.add_subparsers(dest="command", required=True)
 
     analyze = commands.add_parser("analyze", help="list Python files of a project")

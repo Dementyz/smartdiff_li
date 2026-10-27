@@ -3,6 +3,15 @@ from pathlib import Path
 
 import pytest
 
+from smartdiff_li import _pycore, core
+
+try:
+    from smartdiff_li import _core
+except ImportError:
+    _core = None
+
+BACKENDS = {"c": _core, "python": _pycore}
+
 
 class Repo:
     def __init__(self, root: Path) -> None:
@@ -32,3 +41,13 @@ class Repo:
 @pytest.fixture
 def repo(tmp_path):
     return Repo(tmp_path)
+
+
+@pytest.fixture(autouse=True, params=list(BACKENDS))
+def backend(request, monkeypatch):
+    """Каждый тест прогоняется и с C-ядром, и с ядром на Python."""
+    impl = BACKENDS[request.param]
+    if impl is None:
+        pytest.skip("C extension is not built (make ext)")
+    monkeypatch.setattr(core, "_impl", impl)
+    return impl

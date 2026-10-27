@@ -82,3 +82,19 @@ def test_local_uses_of_removed_names_ignore_shadowing():
 def test_syntax_errors_are_collected():
     graph = graph_of({"bad.py": "def (:\n", "ok.py": "x = 1\n"})
     assert graph.broken == ["bad.py"] and "ok" in graph.modules
+
+
+def test_core_edges_match_references_to():
+    # рёбра в ядре должны совпадать с правилами references_to (без эвристики по имени атрибута)
+    graph = graph_of({
+        "m.py": "class C:\n    def __init__(self): pass\n    def a(self): return self.b()\n"
+                "    def b(self): pass\nX = 1\n",
+        "u.py": "from m import C, X\nimport m\ndef run(): return C().a() + X\n"
+                "def other(): return m.C.b\n",
+    })
+    for (module, qualname), node in graph.node_ids.items():
+        kind = graph.modules[module].symbols[qualname].kind
+        expected = {(u.module, u.symbol): c
+                    for u, c in graph.references_to(module, qualname, kind, attr_names=False)}
+        actual = {graph.node_keys[user]: c for user, c, _ in graph.symbol_graph.users(node)}
+        assert actual == expected, (module, qualname)

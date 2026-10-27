@@ -101,23 +101,11 @@ def trace_impact(graph: ProjectGraph, change: Change, depth: int,
                 hits.append((use, True))
         return _impacted(hits, 1, changed)
 
-    seen = {(module, qualname)}
-    frontier = [(module, qualname, change.kind, True)]
-    result = []
-    for level in range(1, depth + 1):
-        nxt = []
-        for mod, qual, kind, certain in frontier:
-            hits = graph.references_to(mod, qual, kind, attr_names=level == 1)
-            for use, hit_certain in hits:
-                key = (use.module, use.symbol)
-                if key in seen:
-                    continue
-                seen.add(key)
-                sure = certain and hit_certain
-                result.extend(_impacted([(use, sure)], level, changed))
-                nxt.append((use.module, use.symbol, graph.kind_of(*key), sure))
-        frontier = nxt
-    return result
+    if depth < 1:
+        return []
+    seeds = graph.references_to(module, qualname, change.kind)
+    return [Impacted(mod, sym, graph.modules[mod].path, line, level, certain, (mod, sym) in changed)
+            for mod, sym, level, certain, line in graph.trace(module, qualname, depth, seeds)]
 
 
 def _label(change: Change) -> str:
@@ -218,7 +206,7 @@ def analyze_diff(root: Path, base: str, head: str | None, label: str,
 
     changed_modules = {c.module for c in changes if c.module in graph.modules}
     dependents: dict[str, int] = {}
-    for module in changed_modules:
+    for module in sorted(changed_modules):
         for dep, dist in graph.dependents(module).items():
             if dep not in changed_modules:
                 dependents[dep] = min(dist, dependents.get(dep, dist))
@@ -231,6 +219,7 @@ def analyze_diff(root: Path, base: str, head: str | None, label: str,
 
     return Analysis(
         label=label, items=items, cosmetic=cosmetic, other_files=other,
-        unparsable=unparsable, dependents=dependents, tests=sorted(tests),
+        unparsable=unparsable,
+        dependents=dict(sorted(dependents.items(), key=lambda kv: (kv[1], kv[0]))), tests=sorted(tests),
         risk=_assess(items, tests, syntax_errors), python_files=len(new_paths),
     )
